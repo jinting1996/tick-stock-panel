@@ -60,10 +60,10 @@ jobs:
         run: |
           if [ "${{ inputs.strategy }}" = "hard-reset" ]; then
             git reset --hard FETCH_HEAD
-            git push --force-with-lease origin main
+            git push --force-with-lease origin HEAD:${{ github.ref_name }}
             echo "result=reset" >> "$GITHUB_OUTPUT"
           elif git merge --no-edit FETCH_HEAD; then
-            git push origin main
+            git push origin HEAD:${{ github.ref_name }}
             echo "result=merged" >> "$GITHUB_OUTPUT"
           else
             git merge --abort || true
