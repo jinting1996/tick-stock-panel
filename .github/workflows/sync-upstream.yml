@@ -1,0 +1,84 @@
+name: Sync Upstream
+
+# 自动跟随上游 shy3130/tick-stock-panel@main
+#   - 定时: 每 2 小时检查一次上游
+#   - 手动: Actions 页面 → Sync Upstream → Run workflow，可选同步策略
+#
+# 默认策略 merge: 保留本仓库的本地改动，冲突时中止并开 Issue 告警，绝不强行覆盖。
+# 逃生策略 hard-reset: 强制对齐上游，会丢弃本仓库的本地改动，仅手动触发可用。
+
+on:
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: 'merge = 保留本地改动(推荐) | hard-reset = 强制对齐上游(丢弃本地改动)'
+        type: choice
+        options: [merge, hard-reset]
+        default: merge
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # 用 URL + FETCH_HEAD 而非 remote-tracking ref，避免依赖 remote 配置
+      - name: Fetch upstream
+        run: git fetch https://github.com/shy3130/tick-stock-panel.git main --no-tags
+
+      - name: Check updates
+        id: check
+        run: |
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "has_update=false" >> "$GITHUB_OUTPUT"
+            echo "本地已包含上游全部提交，无需同步"
+          else
+            echo "has_update=true" >> "$GITHUB_OUTPUT"
+            echo "检测到上游新提交: $(git rev-parse --short FETCH_HEAD)"
+          fi
+
+      - name: Sync
+        if: steps.check.outputs.has_update == 'true'
+        id: sync
+        run: |
+          if [ "${{ inputs.strategy }}" = "hard-reset" ]; then
+            git reset --hard FETCH_HEAD
+            git push --force-with-lease origin main
+            echo "result=reset" >> "$GITHUB_OUTPUT"
+          elif git merge --no-edit FETCH_HEAD; then
+            git push origin main
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort || true
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Conflict alert
+        if: steps.sync.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '上游 `shy3130/tick-stock-panel@main` 有新提交，自动合并与本仓库的本地改动冲突，已中止同步（本地改动未被覆盖）。\n\n手动解决：\n\n```bash\ngit fetch https://github.com/shy3130/tick-stock-panel.git main\ngit merge FETCH_HEAD\n# 解决冲突后\ngit push origin main\n```\n' > /tmp/conflict.md
+          if gh issue list --state open --search "Upstream sync conflict in:title" --json number --jq 'length' | grep -q '^0$'; then
+            gh issue create --title "Upstream sync conflict" --body-file /tmp/conflict.md
+          else
+            echo "已存在未关闭的冲突告警 Issue，跳过创建"
+          fi
+          exit 1
